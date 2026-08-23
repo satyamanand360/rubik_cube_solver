@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Rubik's Cube 3D Solver</title>
+  <meta name="description" content="Interactive 3D Rubik's Cube solver with step-by-step animated solution, timer, move counter and statistics." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800&family=Fira+Mono:wght@400;500&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="style.css" />
+</head>
+<body>
+
+  <!-- Header -->
+  <header class="site-header">
+    <div class="header-brand">
+      <span class="header-icon">⬡</span>
+      <h1 class="header-title">Rubik's Cube <span class="accent">Solver</span></h1>
+    </div>
+    <div id="status-pill" class="status-pill status-idle">● Idle</div>
+  </header>
+
+  <!-- Main layout -->
+  <main class="app-main">
+
+    <!-- 3D Viewport -->
+    <section class="cube-section">
+      <canvas id="cube-canvas"></canvas>
+      <div class="canvas-hint">Drag to rotate · Scroll to zoom</div>
+    </section>
+
+    <!-- Right panel -->
+    <aside class="side-panel">
+
+      <!-- Timer & Moves -->
+      <div class="card timer-card">
+        <div class="timer-display" id="timer-display">0.00</div>
+        <div class="timer-sub">seconds</div>
+        <div class="move-row">
+          <div class="stat-box">
+            <span class="stat-val" id="move-count">0</span>
+            <span class="stat-lbl">Moves</span>
+          </div>
+          <div class="stat-box">
+            <span class="stat-val" id="scramble-n">8</span>
+            <span class="stat-lbl">Scramble length</span>
+          </div>
+        </div>
+      </div>
+
+      <!-- Controls -->
+      <div class="card controls-card">
+        <div class="btn-group">
+          <button id="btn-scramble" class="btn btn-primary" onclick="doScramble()">
+            <span class="btn-icon">🔀</span> Scramble
+          </button>
+          <button id="btn-solve" class="btn btn-success" onclick="doSolve()" disabled>
+            <span class="btn-icon">✨</span> Solve
+          </button>
+          <button id="btn-reset" class="btn btn-ghost" onclick="doReset()">
+            <span class="btn-icon">↺</span> Reset
+          </button>
+        </div>
+
+        <div class="slider-row">
+          <label for="scramble-slider">Scramble moves: <strong id="scramble-label">8</strong></label>
+          <input id="scramble-slider" type="range" min="3" max="12" value="8"
+                 oninput="document.getElementById('scramble-label').textContent=this.value;
+                          document.getElementById('scramble-n').textContent=this.value;" />
+        </div>
+        <div class="slider-row">
+          <label for="speed-slider">Speed: <strong id="speed-label">Medium</strong></label>
+          <input id="speed-slider" type="range" min="1" max="5" value="3"
+                 oninput="updateSpeed(+this.value)" />
+        </div>
+      </div>
+
+      <!-- Custom state input -->
+      <div class="card custom-card">
+        <div class="card-header">
+          <span class="card-title">Custom Position</span>
+          <span class="badge">Manual</span>
+        </div>
+        <p class="custom-hint">Type a move sequence to set any cube position, then press <strong>Solve</strong>.</p>
+        <input id="custom-input" type="text" class="move-input"
+               placeholder="e.g.  R U R' F2 L D2 B'"
+               spellcheck="false" autocomplete="off"
+               onkeydown="if(event.key==='Enter') doCustom()" />
+        <div class="notation-hint">
+          <span>R L U D F B</span> <span class="sep">·</span>
+          <span>R2 = 180°</span> <span class="sep">·</span>
+          <span>R' = CCW</span>
+        </div>
+        <div class="custom-examples">
+          <span class="example-lbl">Try:</span>
+          <button class="chip-btn" id="ex1" onclick="fillExample(&quot;R U R' U' R U R' U' R U R' U'&quot;)">Sexy ×3</button>
+          <button class="chip-btn" id="ex2" onclick="fillExample(&quot;R U2 R' U' R U' R'&quot;)">Sune</button>
+          <button class="chip-btn" id="ex3" onclick="fillExample(&quot;R U R' U R U2 R'&quot;)">Anti-Sune</button>
+          <button class="chip-btn" id="ex4" onclick="fillExample(&quot;M2 U M2 U2 M2 U M2&quot;, true)">H-perm</button>
+        </div>
+        <button class="btn btn-primary" style="width:100%;margin-top:10px"
+                id="btn-custom" onclick="doCustom()">
+          <span class="btn-icon">⌨️</span> Apply &amp; Animate
+        </button>
+      </div>
+
+      <!-- Solution moves -->
+      <div class="card solution-card">
+        <div class="card-header">
+          <span class="card-title">Solution</span>
+          <span class="badge" id="solution-badge">—</span>
+        </div>
+        <div class="solution-list" id="solution-list">
+          <span class="solution-placeholder">Press Scramble, then Solve</span>
+        </div>
+      </div>
+
+      <!-- Statistics -->
+      <div class="card stats-card">
+        <div class="card-header"><span class="card-title">Statistics</span></div>
+        <div class="stats-grid">
+          <div class="stat-item">
+            <span class="stat-item-val" id="stat-solves">0</span>
+            <span class="stat-item-lbl">Solves</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-item-val" id="stat-best">—</span>
+            <span class="stat-item-lbl">Best</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-item-val" id="stat-avg">—</span>
+            <span class="stat-item-lbl">Avg</span>
+          </div>
+          <div class="stat-item">
+            <span class="stat-item-val" id="stat-moves">0</span>
+            <span class="stat-item-lbl">Total moves</span>
+          </div>
+        </div>
+      </div>
+
+    </aside>
+  </main>
+
+  <!-- Toast notification -->
+  <div id="toast" class="toast hidden"></div>
+
+  <!-- Three.js via importmap -->
+  <script type="importmap">
+  {
+    "imports": {
+      "three": "https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.160.0/examples/jsm/"
+    }
+  }
+  </script>
+  <script type="module" src="app.js"></script>
+
+</body>
+</html>
