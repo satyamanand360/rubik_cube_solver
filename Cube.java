@@ -79,10 +79,7 @@ public class Cube {
     private static final int[][] MOVE_PERM = buildFullMoveTables(CW_PERM);
 
     public void applyMove(Move m) {
-        int[] perm = MOVE_PERM[m.ordinal()];
-        byte[] next = new byte[NUM_FACELETS];
-        for (int i = 0; i < NUM_FACELETS; i++) next[i] = state[perm[i]];
-        state = next;
+        state = applyMoveToState(state, m);
     }
 
     public void applyMoves(List<Move> moves) {

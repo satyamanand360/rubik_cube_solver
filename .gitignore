@@ -1,2 +1,4 @@
 *.class
 .DS_Store
+corner_pdb.dat
+TestSolve.java

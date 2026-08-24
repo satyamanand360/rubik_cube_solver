@@ -17,7 +17,7 @@ import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
 // ──────────────────────────────────────────────────────────────
 // Constants
 // ──────────────────────────────────────────────────────────────
-const API   = 'http://localhost:8080';
+const API   = 'http://localhost:8081';
 const GAP   = 1.08;    // centre-to-centre spacing
 const SIZE  = 0.96;    // cubie side length
 const INNER = 0x000000; // pure black for hidden inner faces
@@ -99,6 +99,7 @@ let cubeState  = Array.from({length:54}, (_,i) => Math.floor(i/9));
 let cubies     = [];     // [{mesh, ix, iy, iz}, ...]
 let animSpeed  = 320;    // ms per quarter-turn
 let isAnimating = false;
+let currentAlgo = 'bfs'; // bfs or idastar
 
 // Timer
 let timerStart    = 0;
@@ -186,6 +187,24 @@ function buildScene() {
   controls.autoRotate      = false;
   controls.autoRotateSpeed = 0.5;
 
+  // Generate dynamic environment map for reflections
+  const pmremGenerator = new THREE.PMREMGenerator(renderer);
+  pmremGenerator.compileEquirectangularShader();
+  
+  const envScene = new THREE.Scene();
+  envScene.background = new THREE.Color(0x222222);
+  const envLight = new THREE.DirectionalLight(0xffffff, 2);
+  envLight.position.set(0, 1, 0);
+  envScene.add(envLight);
+  const envLight2 = new THREE.DirectionalLight(0xaabbff, 1.5);
+  envLight2.position.set(1, 0, 1);
+  envScene.add(envLight2);
+  const envLight3 = new THREE.DirectionalLight(0xffbbaa, 1.5);
+  envLight3.position.set(-1, -1, -1);
+  envScene.add(envLight3);
+  
+  scene.environment = pmremGenerator.fromScene(envScene).texture;
+
   window.addEventListener('resize', () => {
     const w = canvas.clientWidth, h = canvas.clientHeight;
     camera.aspect = w / h;
@@ -200,9 +219,16 @@ function buildCubies() {
   for (let ix = -1; ix <= 1; ix++) {
     for (let iy = -1; iy <= 1; iy++) {
       for (let iz = -1; iz <= 1; iz++) {
-        // MeshStandardMaterial: not affected by shadow map darkness
+        // MeshPhysicalMaterial: glossy plastic look with reflections
         const mats = Array.from({length:6}, () =>
-          new THREE.MeshStandardMaterial({ color: INNER, roughness: 0.5, metalness: 0.0 })
+          new THREE.MeshPhysicalMaterial({ 
+            color: INNER, 
+            roughness: 0.1, 
+            metalness: 0.1,
+            clearcoat: 1.0,
+            clearcoatRoughness: 0.1,
+            envMapIntensity: 1.2
+          })
         );
         const mesh = new THREE.Mesh(geo, mats);
         mesh.position.set(ix*GAP, iy*GAP, iz*GAP);
@@ -348,6 +374,7 @@ window.doScramble = async function() {
   stopTimer();
   sessionMoves = 0;
   document.getElementById('move-count').textContent = 0;
+  document.getElementById('manual-log').textContent = '';  // clear manual move history on new scramble
 
   const n = +document.getElementById('scramble-slider').value;
 
@@ -357,7 +384,7 @@ window.doScramble = async function() {
   let data;
   try {
     data = await fetch(`${API}/scramble?n=${n}`, {method:'POST'}).then(r=>r.json());
-  } catch {
+  } catch (e) {
     showToast('⚠️ Server error during scramble'); setBtns(true); return;
   }
 
@@ -379,6 +406,41 @@ window.doScramble = async function() {
   );
 };
 
+window.setAlgo = function(algo) {
+  currentAlgo = algo;
+  document.getElementById('tab-bfs').classList.toggle('active', algo === 'bfs');
+  document.getElementById('tab-ida').classList.toggle('active', algo === 'idastar');
+}
+
+window.doManualMove = async function(moveName) {
+  if (isAnimating) return;
+  
+  // Log move visually
+  const logDiv = document.getElementById('manual-log');
+  logDiv.textContent += (logDiv.textContent ? " " : "") + moveName;
+  logDiv.scrollTop = logDiv.scrollHeight;
+
+  // Apply instantly local
+  isAnimating = true;
+  await animateMove(moveName);
+  
+  // Sync INCREMENTALLY with server — /move applies the single move to the
+  // current backend state WITHOUT resetting, so manual move history accumulates.
+  try {
+    const res = await fetch(`${API}/move?m=${encodeURIComponent(moveName)}`, {method:'POST'});
+    const data = await res.json();
+    if (data.state) {
+      cubeState = data.state;   // keep local state in sync with authoritative server state
+      updateAllColors(cubeState);
+    }
+  } catch (err) {
+    console.error("Failed to sync move with server:", err);
+  } finally {
+    isAnimating = false;
+    document.getElementById('btn-solve').disabled = false;
+  }
+}
+
 window.doSolve = async function() {
   if (isAnimating) return;
 
@@ -388,9 +450,22 @@ window.doSolve = async function() {
 
   let data;
   try {
-    data = await fetch(`${API}/solve`, {method:'POST'}).then(r=>r.json());
-  } catch {
-    showToast('⚠️ Server error during solve');
+    const res = await fetch(`${API}/solve?algorithm=${currentAlgo}`, {method:'POST'});
+    if (!res.ok) {
+        try {
+            data = await res.json();
+            showToast('⚠️ ' + (data.error || 'Server error during solve'));
+        } catch (parseErr) {
+            showToast('⚠️ Server returned error status: ' + res.status);
+        }
+        setBtns(true);
+        setStatus('idle', '● Error');
+        document.getElementById('btn-solve').innerHTML = '<span class="btn-icon">✨</span> Solve';
+        return;
+    }
+    data = await res.json();
+  } catch (e) {
+    showToast('⚠️ Network error during solve: ' + e.message);
     setBtns(true);
     setStatus('idle', '● Error');
     document.getElementById('btn-solve').innerHTML = '<span class="btn-icon">✨</span> Solve';
@@ -436,6 +511,7 @@ window.doReset = async function() {
   document.getElementById('move-count').textContent = 0;
   document.getElementById('timer-display').textContent = '0.00';
   clearSolutionList();
+  document.getElementById('manual-log').textContent = '';  // clear manual move history
 
   try {
     const data = await fetch(`${API}/reset`, {method:'POST'}).then(r=>r.json());

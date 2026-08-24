@@ -24,17 +24,25 @@ import java.util.concurrent.*;
  */
 public class CubeServer {
 
-    private static final int PORT = 8080;
+    private static final int PORT = 8081;
 
-    // Single shared cube (one-user local server is fine)
-    private static final Cube cube = new Cube();
-    // Store last scramble for fallback inverse
-    private static List<Cube.Move> lastScramble = Collections.emptyList();
+    private static Cube cube = new Cube();
+    private static List<Cube.Move> lastScramble = new ArrayList<>();
+    private static PatternDatabase pdb;
 
     // ---------------------------------------------------------------
     // main
     // ---------------------------------------------------------------
-    public static void main(String[] args) throws Exception {
+    public static void main(String[] args) throws IOException {
+        System.out.println("Initializing Server on port 8081...");
+        pdb = new PatternDatabase();
+        
+        // Build PDB in the background so the server can start serving the UI immediately
+        new Thread(() -> {
+            pdb.loadOrBuild();
+            System.out.println("Pattern Database is ready for IDA* solver.");
+        }).start();
+
         HttpServer server = HttpServer.create(new InetSocketAddress(PORT), 0);
 
         server.createContext("/",           CubeServer::handleStatic);
@@ -43,6 +51,7 @@ public class CubeServer {
         server.createContext("/scramble",   CubeServer::handleScramble);
         server.createContext("/solve",      CubeServer::handleSolve);
         server.createContext("/reset",      CubeServer::handleReset);
+        server.createContext("/move",       CubeServer::handleMove);
         server.createContext("/custom",     CubeServer::handleCustom);
 
         server.setExecutor(Executors.newCachedThreadPool());
@@ -133,32 +142,80 @@ public class CubeServer {
         addCors(ex);
         if ("OPTIONS".equals(ex.getRequestMethod())) { ex.sendResponseHeaders(204, -1); return; }
 
+        String algo = queryStr(ex, "algorithm", "bfs").trim().toLowerCase();
+        int maxDepth = queryInt(ex, "depth", 5); // default BFS depth
         List<Cube.Move> solution;
-        synchronized (cube) {
-            if (cube.isSolved()) {
-                sendJson(ex, 200, "{\"solution\":[],\"state\":" + stateJson(cube.state) + "}");
-                return;
-            }
-            // Try bidirectional BFS (fast for ≤ 10-move scrambles)
-            solution = Solver.solve(cube.copy());
-            // Fallback: inverse of the stored scramble
-            if (solution == null && !lastScramble.isEmpty()) {
-                solution = invertScramble(lastScramble);
-            }
-        }
 
-        if (solution == null) {
-            sendJson(ex, 500, "{\"error\":\"Solver failed\"}");
+        try {
+            long t0 = System.currentTimeMillis();
+            synchronized (cube) {
+                if ("idastar".equals(algo)) {
+                    if (!pdb.isReady()) {
+                        sendJson(ex, 400, "{\"error\":\"Pattern Database is still building. Please wait a moment.\"}");
+                        return;
+                    }
+                    System.out.println("Solving with Korf's IDA*...");
+                    IDAStarSolver solver = new IDAStarSolver(pdb);
+                    solution = solver.solve(cube);
+                    if (solution == null) {
+                        sendJson(ex, 400, "{\"error\":\"IDA* could not find a solution. The cube state may be invalid.\"}" );
+                        return;
+                    }
+                } else {
+                    System.out.println("Solving with Bidirectional BFS...");
+                    // maxDepth=8 per side handles up to ~16-move scrambles optimally
+                    solution = Solver.solve(cube, Math.max(maxDepth, 8));
+                    if (solution == null) {
+                        // Fallback: reverse the recorded scramble path
+                        if (!lastScramble.isEmpty()) {
+                            System.out.println("BFS exceeded depth limit. Using inverse-scramble fallback.");
+                            solution = new ArrayList<>();
+                            for (int i = lastScramble.size() - 1; i >= 0; i--) {
+                                solution.add(Solver.inverseOf(lastScramble.get(i)));
+                            }
+                        } else {
+                            sendJson(ex, 400, "{\"error\":\"BFS could not solve the cube (state may be too complex or invalid). Try IDA* instead.\"}" );
+                            return;
+                        }
+                    }
+                }
+                cube.applyMoves(solution);
+                lastScramble = new ArrayList<>(); // reset after successful solve
+            }
+            long ms = System.currentTimeMillis() - t0;
+            System.out.println("Solved in " + ms + "ms using " + algo + ". Moves: " + solution.size());
+
+            sendJson(ex, 200,
+                "{\"solution\":" + movesJson(solution) + ",\"timeMs\":" + ms + ",\"algorithm\":\"" + algo + "\",\"state\":" + stateJson(cube.state) + "}");
+        } catch (Exception e) {
+            e.printStackTrace();
+            sendJson(ex, 500, "{\"error\":\"Internal Server Error: " + e.getMessage() + "\"}");
+        }
+    }
+
+    /**
+     * Applies a single move INCREMENTALLY to the current cube state.
+     * Used by the Manual Moves grid — does NOT reset the cube first.
+     */
+    private static void handleMove(HttpExchange ex) throws IOException {
+        addCors(ex);
+        if ("OPTIONS".equals(ex.getRequestMethod())) { ex.sendResponseHeaders(204, -1); return; }
+
+        String token = queryStr(ex, "m", "").trim();
+        Cube.Move m = parseMove(token);
+        if (m == null) {
+            sendJson(ex, 400, "{\"error\":\"Unknown move: " + token + "\"}");
             return;
         }
 
-        // Apply solution to server cube so state stays in sync
         synchronized (cube) {
-            cube.applyMoves(solution);
+            cube.applyMove(m);
+            // Track manual moves so the BFS fallback (inverse scramble) is always correct
+            lastScramble = new ArrayList<>(lastScramble);
+            lastScramble.add(m);
         }
 
-        sendJson(ex, 200,
-            "{\"solution\":" + movesJson(solution) + ",\"state\":" + stateJson(cube.state) + "}");
+        sendJson(ex, 200, "{\"state\":" + stateJson(cube.state) + "}");
     }
 
     private static void handleCustom(HttpExchange ex) throws IOException {
